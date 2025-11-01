@@ -84,9 +84,10 @@ def extract_two_digit_prefix(folder_name: str) -> str:
         Two-digit prefix string (e.g., "01" or "15")
         
     Raises:
-        ValueError: If folder name doesn't start with two digits
+        ValueError: If folder name doesn't start with exactly two digits followed by underscore
     """
-    match = re.match(r'^(\d{2})', folder_name)
+    # Must start with exactly two digits followed by underscore
+    match = re.match(r'^(\d{2})_', folder_name)
     if not match:
         raise ValueError(f"Folder name '{folder_name}' does not start with a two-digit prefix")
     return match.group(1)

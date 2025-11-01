@@ -113,8 +113,18 @@ class TestOrganizeFiles:
         output_dir = tmp_path / "output"
         output_dir.mkdir()
         
+        # Test various invalid prefixes
         with pytest.raises(ValueError, match="does not start with a two-digit prefix"):
-            organize_files([file1], "Album", output_dir)
+            organize_files([file1], "Album", output_dir)  # No digits
+        
+        with pytest.raises(ValueError, match="does not start with a two-digit prefix"):
+            organize_files([file1], "1_Album", output_dir)  # Single digit
+        
+        with pytest.raises(ValueError, match="does not start with a two-digit prefix"):
+            organize_files([file1], "001_Album", output_dir)  # Three digits
+        
+        with pytest.raises(ValueError, match="does not start with a two-digit prefix"):
+            organize_files([file1], "01Album", output_dir)  # Missing underscore
     
     def test_organize_files_overwrites_existing(self, tmp_path):
         """Test that existing files are overwritten when overwrite=True."""

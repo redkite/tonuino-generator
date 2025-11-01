@@ -67,7 +67,8 @@ def main(input: str, output: str, update: bool):
     """
     Organize MP3 files from input folders into standardized output structure.
     
-    Processes albums/podcasts in folders with two-digit prefixes.
+    Processes albums/podcasts in folders that start with exactly two digits
+    followed by underscore (e.g., 01_Album, 15_Podcast).
     Each folder should contain a description.yaml file.
     """
     # Initialize configuration
@@ -85,7 +86,7 @@ def main(input: str, output: str, update: bool):
     folders = list(find_album_folders(config.input_path))
     
     if not folders:
-        console.print("[yellow]No valid album/podcast folders found (folders must start with two digits)[/yellow]")
+        console.print("[yellow]No valid album/podcast folders found (folders must start with two digits followed by underscore, e.g., 01_Album)[/yellow]")
         return
     
     console.print(f"Found {len(folders)} album/podcast folder(s)\n")

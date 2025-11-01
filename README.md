@@ -6,7 +6,7 @@ More info on TonUINO can be found at https://github.com/tonuino/TonUINO-TNG
 
 ## Features
 
-- Organizes MP3 files into folders with two-digit prefixes (01, 02, etc.)
+- Organizes MP3 files into folders with two-digit prefixes (01_, 02_, etc., followed by underscore)
 - Renames files to three-digit numbers (001.mp3, 002.mp3, ..., 255.mp3)
 - Supports two input types:
   - **Static albums**: Fixed set of MP3 files
@@ -93,7 +93,7 @@ tonuino-organize --update
 
 ### Input Structure
 
-The input directory should contain folders with two-digit prefixes:
+The input directory should contain folders that start with exactly two digits followed by an underscore:
 ```
 ~/data/tonuino/input/
 ├── 01_MyAlbum/
@@ -144,7 +144,7 @@ Files are organized by their two-digit prefix:
 
 ## How It Works
 
-1. Scans the input directory for folders starting with two-digit prefixes
+1. Scans the input directory for folders starting with exactly two digits followed by underscore (e.g., `01_`, `15_`)
 2. Reads `description.yaml` from each folder
 3. For static albums: finds all MP3 files (recursively)
 4. For RSS podcasts:
@@ -158,7 +158,9 @@ Files are organized by their two-digit prefix:
 
 ## File Naming Rules
 
-- Input folders must start with exactly two digits (e.g., `01_Album`, `15_Podcast`)
+- Input folders must start with exactly two digits followed by an underscore (e.g., `01_Album`, `15_Podcast`)
+  - Valid: `01_MyAlbum`, `15_Podcast`, `99_Test`
+  - Invalid: `1_Album` (single digit), `001_Album` (three digits), `01Album` (missing underscore)
 - MP3 files are sorted alphanumerically (natural sort)
 - Output files are renamed to three-digit numbers: `001.mp3`, `002.mp3`, ..., `255.mp3`
 - Maximum of 255 files per album/podcast
@@ -237,17 +239,39 @@ This will:
 pip install -e .
 ```
 
-3. Run tests:
+3. Install test dependencies:
 ```bash
-pytest tests/
+pip install -r requirements.txt
 ```
 
-Alternatively, run directly without installation:
+4. Run tests:
+```bash
+# Run all tests
+pytest tests/
+
+# Run tests with verbose output
+pytest tests/ -v
+
+# Run a specific test file
+pytest tests/test_utils.py
+
+# Run tests with coverage (if pytest-cov is installed)
+pytest tests/ --cov=tonuino_organizer
+```
+
+5. Run the application directly without installation:
 ```bash
 # In virtual environment, after installing dependencies:
-pip install -r requirements.txt
-
-# Run as module:
 python -m tonuino_organizer.cli --help
 ```
+
+### Test Coverage
+
+The project includes comprehensive unit tests for:
+- `utils.py` - Path expansion, file sorting, validation, prefix extraction
+- `config.py` - Configuration management
+- `description.py` - YAML parsing and validation
+- `file_organizer.py` - File organization logic
+- `album_handler.py` - Static album processing
+- `podcast_handler.py` - RSS feed processing (with mocks)
 
