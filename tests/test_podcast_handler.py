@@ -138,6 +138,106 @@ class TestPodcastHandler:
         assert len(mp3_files) == 2
         assert all(f.suffix.lower() == ".mp3" for f in mp3_files)
     
+    def test_scan_local_files(self, tmp_path):
+        """Test scanning local files with three-digit prefixes."""
+        (tmp_path / "001_Episode1.mp3").touch()
+        (tmp_path / "002_Episode2.mp3").touch()
+        (tmp_path / "015_Episode15.mp3").touch()
+        (tmp_path / "episode_without_prefix.mp3").touch()  # Should be ignored
+        
+        handler = PodcastHandler(tmp_path)
+        
+        assert 1 in handler.local_files_by_number
+        assert 2 in handler.local_files_by_number
+        assert 15 in handler.local_files_by_number
+        assert len(handler.local_files_by_number) == 3
+    
+    def test_load_url_mapping(self, tmp_path):
+        """Test loading URL to number mapping."""
+        mapping_file = tmp_path / ".url_mapping"
+        mapping_file.write_text(
+            "https://example.com/ep1.mp3|1\n"
+            "https://example.com/ep2.mp3|2\n"
+        )
+        
+        handler = PodcastHandler(tmp_path)
+        
+        assert handler.url_to_number["https://example.com/ep1.mp3"] == 1
+        assert handler.url_to_number["https://example.com/ep2.mp3"] == 2
+    
+    def test_save_url_mapping(self, tmp_path):
+        """Test saving URL to number mapping."""
+        handler = PodcastHandler(tmp_path)
+        handler._save_url_mapping("https://example.com/ep1.mp3", 1)
+        
+        assert "https://example.com/ep1.mp3" in handler.url_to_number
+        assert handler.url_to_number["https://example.com/ep1.mp3"] == 1
+        
+        mapping_file = tmp_path / ".url_mapping"
+        assert mapping_file.exists()
+        assert "https://example.com/ep1.mp3|1" in mapping_file.read_text()
+    
+    def test_match_local_file_to_url(self, tmp_path):
+        """Test matching local file to URL."""
+        # Create local file
+        (tmp_path / "005_Episode.mp3").touch()
+        
+        # Create mapping
+        mapping_file = tmp_path / ".url_mapping"
+        mapping_file.write_text("https://example.com/ep5.mp3|5\n")
+        
+        handler = PodcastHandler(tmp_path)
+        
+        # Should match
+        number = handler._match_local_file_to_url("https://example.com/ep5.mp3")
+        assert number == 5
+        
+        # Should not match
+        number = handler._match_local_file_to_url("https://example.com/ep6.mp3")
+        assert number is None
+    
+    def test_get_numbered_filename(self, tmp_path):
+        """Test generating numbered filename."""
+        handler = PodcastHandler(tmp_path)
+        
+        # URL without .mp3 extension will use episode title
+        filename = handler._get_numbered_filename(
+            "https://example.com/episode",
+            "Test Episode",
+            1
+        )
+        assert filename == "001_Test_Episode.mp3"
+        
+        filename = handler._get_numbered_filename(
+            "https://example.com/episode",
+            "Test Episode",
+            42
+        )
+        assert filename == "042_Test_Episode.mp3"
+        
+        # URL with .mp3 extension will use filename from URL
+        filename = handler._get_numbered_filename(
+            "https://example.com/episode.mp3",
+            "Test Episode",
+            5
+        )
+        assert filename == "005_episode.mp3"
+    
+    def test_get_numbered_filename_removes_existing_prefix(self, tmp_path):
+        """Test that existing three-digit prefix is removed."""
+        handler = PodcastHandler(tmp_path)
+        
+        # Use URL without .mp3 extension so episode title is used
+        filename = handler._get_numbered_filename(
+            "https://example.com/episode",
+            "001_Old_Episode",  # Has prefix in title
+            5
+        )
+        # Should use cleaned title without prefix
+        assert filename.startswith("005_")
+        assert "001_" not in filename  # Original prefix should be removed
+    
+    
     @patch('tonuino_organizer.podcast_handler.MP3')
     def test_get_local_files_removes_short_files(self, mock_mp3_class, tmp_path):
         """Test that get_local_files removes files that are too short."""
@@ -179,9 +279,10 @@ class TestPodcastHandler:
         mock_feed.bozo = False
         mock_feedparser.parse.return_value = mock_feed
         
-        # Mark URL as already downloaded
-        downloaded_file = tmp_path / ".downloaded_files"
-        downloaded_file.write_text("https://example.com/ep1.mp3\n")
+        # Create local file with numbered prefix and mapping
+        (tmp_path / "001_Test_Episode.mp3").touch()
+        mapping_file = tmp_path / ".url_mapping"
+        mapping_file.write_text("https://example.com/ep1.mp3|1\n")
         
         handler = PodcastHandler(tmp_path)
         downloaded_files = handler.download_episodes("https://example.com/feed.xml")
@@ -226,6 +327,144 @@ class TestPodcastHandler:
         
         # URL should be in rejected list
         assert "https://example.com/short.mp3" in handler.rejected_urls
+    
+    @patch('tonuino_organizer.podcast_handler.MP3')
+    @patch('tonuino_organizer.podcast_handler.feedparser')
+    @patch('tonuino_organizer.podcast_handler.requests')
+    def test_download_episodes_numbers_chronologically(
+        self, mock_requests, mock_feedparser, mock_mp3_class, tmp_path
+    ):
+        """Test that downloads are numbered chronologically."""
+        # Set up feed with multiple entries (feedparser usually returns newest first)
+        mock_feed = MagicMock()
+        entry1 = MagicMock()
+        entry1.get.return_value = "Episode 1 (Oldest)"
+        entry1.enclosures = [{'type': 'audio/mpeg', 'href': 'https://example.com/ep1.mp3'}]
+        entry2 = MagicMock()
+        entry2.get.return_value = "Episode 2"
+        entry2.enclosures = [{'type': 'audio/mpeg', 'href': 'https://example.com/ep2.mp3'}]
+        entry3 = MagicMock()
+        entry3.get.return_value = "Episode 3 (Newest)"
+        entry3.enclosures = [{'type': 'audio/mpeg', 'href': 'https://example.com/ep3.mp3'}]
+        
+        # Feed entries in reverse chronological order (newest first, as typical)
+        mock_feed.entries = [entry3, entry2, entry1]
+        mock_feed.bozo = False
+        mock_feedparser.parse.return_value = mock_feed
+        
+        # Mock download response
+        mock_response = MagicMock()
+        mock_response.headers = {'content-length': '10000'}
+        mock_response.iter_content.return_value = [b"fake mp3 content"]
+        mock_response.raise_for_status.return_value = None
+        mock_requests.get.return_value = mock_response
+        
+        # Mock MP3 duration - return valid duration
+        mock_audio = MagicMock()
+        mock_audio.info.length = 120.0  # Long enough
+        mock_mp3_class.return_value = mock_audio
+        
+        handler = PodcastHandler(tmp_path, min_duration=60.0)
+        downloaded_files = handler.download_episodes("https://example.com/feed.xml")
+        
+        # Should download all three episodes
+        assert len(downloaded_files) == 3
+        
+        # Check filenames have three-digit prefixes
+        filenames = [f.name for f in downloaded_files]
+        assert any("001_" in f for f in filenames)
+        assert any("002_" in f for f in filenames)
+        assert any("003_" in f for f in filenames)
+    
+    @patch('tonuino_organizer.podcast_handler.MP3')
+    @patch('tonuino_organizer.podcast_handler.feedparser')
+    @patch('tonuino_organizer.podcast_handler.requests')
+    def test_download_episodes_skips_numbers_for_orphaned_files(
+        self, mock_requests, mock_feedparser, mock_mp3_class, tmp_path
+    ):
+        """Test that numbers are skipped for files not in feed."""
+        # Create local file not in feed
+        (tmp_path / "005_Orphaned_Episode.mp3").touch()
+        mapping_file = tmp_path / ".url_mapping"
+        mapping_file.write_text("https://example.com/orphaned.mp3|5\n")
+        
+        # Set up feed with new episode
+        mock_feed = MagicMock()
+        mock_entry = MagicMock()
+        mock_entry.get.return_value = "New Episode"
+        mock_entry.enclosures = [{'type': 'audio/mpeg', 'href': 'https://example.com/new.mp3'}]
+        mock_feed.entries = [mock_entry]
+        mock_feed.bozo = False
+        mock_feedparser.parse.return_value = mock_feed
+        
+        # Mock download response
+        mock_response = MagicMock()
+        mock_response.headers = {'content-length': '10000'}
+        mock_response.iter_content.return_value = [b"fake mp3 content"]
+        mock_response.raise_for_status.return_value = None
+        mock_requests.get.return_value = mock_response
+        
+        # Mock MP3 duration
+        mock_audio = MagicMock()
+        mock_audio.info.length = 120.0
+        mock_mp3_class.return_value = mock_audio
+        
+        handler = PodcastHandler(tmp_path, min_duration=60.0)
+        downloaded_files = handler.download_episodes("https://example.com/feed.xml")
+        
+        # Should download one episode
+        assert len(downloaded_files) == 1
+        
+        # Should be numbered 001 (since 005 is reserved for orphaned file)
+        downloaded_file = downloaded_files[0]
+        assert downloaded_file.name.startswith("001_")
+        
+        # Orphaned file should still exist
+        assert (tmp_path / "005_Orphaned_Episode.mp3").exists()
+    
+    @patch('tonuino_organizer.podcast_handler.MP3')
+    @patch('tonuino_organizer.podcast_handler.feedparser')
+    @patch('tonuino_organizer.podcast_handler.requests')
+    def test_download_episodes_continues_after_existing_files(
+        self, mock_requests, mock_feedparser, mock_mp3_class, tmp_path
+    ):
+        """Test that new downloads continue numbering after existing files."""
+        # Create existing files with numbers
+        (tmp_path / "001_Existing1.mp3").touch()
+        (tmp_path / "002_Existing2.mp3").touch()
+        mapping_file = tmp_path / ".url_mapping"
+        mapping_file.write_text(
+            "https://example.com/existing1.mp3|1\n"
+            "https://example.com/existing2.mp3|2\n"
+        )
+        
+        # Set up feed with new episode
+        mock_feed = MagicMock()
+        mock_entry = MagicMock()
+        mock_entry.get.return_value = "New Episode"
+        mock_entry.enclosures = [{'type': 'audio/mpeg', 'href': 'https://example.com/new.mp3'}]
+        mock_feed.entries = [mock_entry]
+        mock_feed.bozo = False
+        mock_feedparser.parse.return_value = mock_feed
+        
+        # Mock download response
+        mock_response = MagicMock()
+        mock_response.headers = {'content-length': '10000'}
+        mock_response.iter_content.return_value = [b"fake mp3 content"]
+        mock_response.raise_for_status.return_value = None
+        mock_requests.get.return_value = mock_response
+        
+        # Mock MP3 duration
+        mock_audio = MagicMock()
+        mock_audio.info.length = 120.0
+        mock_mp3_class.return_value = mock_audio
+        
+        handler = PodcastHandler(tmp_path, min_duration=60.0)
+        downloaded_files = handler.download_episodes("https://example.com/feed.xml")
+        
+        # Should download one episode numbered 003 (after existing 001, 002)
+        assert len(downloaded_files) == 1
+        assert downloaded_files[0].name.startswith("003_")
 
 
 class TestProcessPodcast:

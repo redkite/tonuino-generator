@@ -1,8 +1,9 @@
 """Handler for RSS feed podcast processing and downloading."""
 
 import hashlib
+import re
 from pathlib import Path
-from typing import List, Set
+from typing import List, Set, Dict, Optional
 from urllib.parse import urlparse
 
 import feedparser
@@ -35,8 +36,11 @@ class PodcastHandler:
         self.min_duration = min_duration
         self.downloaded_files_file = folder_path / ".downloaded_files"
         self.rejected_files_file = folder_path / ".rejected_files"
+        self.url_mapping_file = folder_path / ".url_mapping"
         self.downloaded_urls: Set[str] = self._load_downloaded_urls()
         self.rejected_urls: Set[str] = self._load_rejected_urls()
+        self.url_to_number: Dict[str, int] = self._load_url_mapping()
+        self.local_files_by_number: Dict[int, Path] = self._scan_local_files()
     
     def _load_downloaded_urls(self) -> Set[str]:
         """Load set of already downloaded file URLs."""
@@ -79,6 +83,100 @@ class PodcastHandler:
             self.rejected_urls.add(url)
         except Exception as e:
             console.print(f"[yellow]Warning: Could not save rejected URL: {e}[/yellow]")
+    
+    def _load_url_mapping(self) -> Dict[str, int]:
+        """
+        Load URL to number mapping from file.
+        
+        Format: URL|NUMBER
+        
+        Returns:
+            Dictionary mapping URL to number
+        """
+        if not self.url_mapping_file.exists():
+            return {}
+        
+        try:
+            url_to_number = {}
+            with open(self.url_mapping_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if '|' in line:
+                        url, number_str = line.split('|', 1)
+                        try:
+                            url_to_number[url] = int(number_str)
+                        except ValueError:
+                            continue
+            return url_to_number
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not read URL mapping: {e}[/yellow]")
+            return {}
+    
+    def _save_url_mapping(self, url: str, number: int):
+        """Save URL to number mapping."""
+        try:
+            with open(self.url_mapping_file, 'a', encoding='utf-8') as f:
+                f.write(f"{url}|{number}\n")
+            self.url_to_number[url] = number
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not save URL mapping: {e}[/yellow]")
+    
+    def _scan_local_files(self) -> Dict[int, Path]:
+        """
+        Scan local files and extract their three-digit prefixes.
+        
+        Returns:
+            Dictionary mapping number to file path
+        """
+        local_files = {}
+        mp3_files = find_mp3_files(self.folder_path, recursive=True)
+        
+        for file_path in mp3_files:
+            # Check if filename starts with three digits followed by underscore
+            match = re.match(r'^(\d{3})_', file_path.name)
+            if match:
+                number = int(match.group(1))
+                local_files[number] = file_path
+        
+        return local_files
+    
+    def _match_local_file_to_url(self, url: str) -> Optional[int]:
+        """
+        Try to match a local file to a URL by checking the URL mapping.
+        
+        Args:
+            url: URL to match
+            
+        Returns:
+            Number if URL matches a local file, None otherwise
+        """
+        if url in self.url_to_number:
+            number = self.url_to_number[url]
+            if number in self.local_files_by_number:
+                return number
+        return None
+    
+    
+    def _get_numbered_filename(self, url: str, episode_title: str, number: int) -> str:
+        """
+        Generate a numbered filename.
+        
+        Args:
+            url: Download URL
+            episode_title: Episode title
+            number: Three-digit number prefix
+            
+        Returns:
+            Filename with three-digit prefix (e.g., "001_Episode_Title.mp3")
+        """
+        # Get base filename
+        base_filename = self._get_filename_from_url(url, episode_title)
+        
+        # Remove any existing three-digit prefix
+        base_filename = re.sub(r'^\d{3}_', '', base_filename)
+        
+        # Add three-digit prefix
+        return f"{number:03d}_{base_filename}"
     
     def _get_mp3_duration(self, file_path: Path) -> float:
         """
@@ -170,11 +268,52 @@ class PodcastHandler:
         
         console.print(f"  Found {len(feed.entries)} episode(s) in feed")
         
+        # Reverse feed entries for chronological order (oldest first)
+        # Feed entries are usually newest first, so reverse to get chronological
+        feed_entries = list(reversed(feed.entries))
+        
+        # Build URL to entry mapping for lookup
+        url_to_entry = {}
+        for entry in feed_entries:
+            mp3_url = None
+            if hasattr(entry, 'enclosures'):
+                for enclosure in entry.enclosures:
+                    if enclosure.get('type', '').startswith('audio/'):
+                        mp3_url = enclosure.get('href')
+                        break
+            if not mp3_url and hasattr(entry, 'links'):
+                for link in entry.links:
+                    if link.get('type', '').startswith('audio/'):
+                        mp3_url = link.get('href')
+                        break
+            if mp3_url:
+                url_to_entry[mp3_url] = entry
+        
+        # Build set of URLs in current feed
+        feed_urls = set(url_to_entry.keys())
+        
+        # Find numbers used by local files NOT in feed (to preserve their numbering)
+        # These are files that exist locally but their URLs are no longer in the feed
+        numbers_reserved_by_orphaned_files = set()
+        for number, file_path in self.local_files_by_number.items():
+            # Check if this number maps to a URL not in the current feed
+            url_for_number = None
+            for url, num in self.url_to_number.items():
+                if num == number:
+                    url_for_number = url
+                    break
+            
+            if url_for_number is None or url_for_number not in feed_urls:
+                # This number is used by a file not in feed (or unmapped), reserve it
+                # to keep numbering consistent - these files keep their numbers
+                numbers_reserved_by_orphaned_files.add(number)
+        
         downloaded_files = []
         new_episodes = 0
+        current_number = 1
         
-        # Process entries (usually newest first)
-        for entry in feed.entries:
+        # Process entries in chronological order (oldest first)
+        for entry in feed_entries:
             # Find MP3 enclosure
             mp3_url = None
             if hasattr(entry, 'enclosures'):
@@ -193,22 +332,46 @@ class PodcastHandler:
             if not mp3_url:
                 continue
             
-            # Skip if already downloaded or rejected (too short)
-            if mp3_url in self.downloaded_urls or mp3_url in self.rejected_urls:
+            # Skip if already rejected (too short)
+            if mp3_url in self.rejected_urls:
                 continue
             
-            # Download the episode
             episode_title = entry.get('title', 'Unknown Episode')
-            filename = self._get_filename_from_url(mp3_url, episode_title)
+            
+            # Check if URL matches an existing local file
+            assigned_number = self._match_local_file_to_url(mp3_url)
+            
+            if assigned_number is not None:
+                # File already exists with this number, skip downloading
+                existing_file = self.local_files_by_number[assigned_number]
+                console.print(f"  [dim]Skipping {episode_title} (already exists: {existing_file.name})[/dim]")
+                # Update current_number to be after this existing file
+                if assigned_number >= current_number:
+                    current_number = assigned_number + 1
+                continue
+            
+            # Assign number for new download chronologically
+            # Skip numbers reserved by files not in feed
+            while current_number in numbers_reserved_by_orphaned_files:
+                current_number += 1
+                if current_number > 999:
+                    console.print(f"  [red]Cannot assign number > 999 for {episode_title}, skipping[/red]")
+                    break
+            
+            if current_number > 999:
+                continue
+            
+            assigned_number = current_number
+            current_number += 1  # Prepare for next iteration
+            
+            # Generate numbered filename
+            filename = self._get_numbered_filename(mp3_url, episode_title, assigned_number)
             dest_file = self.folder_path / filename
             
-            # Handle filename conflicts
-            counter = 1
-            original_dest = dest_file
-            while dest_file.exists():
-                stem = original_dest.stem
-                dest_file = self.folder_path / f"{stem}_{counter}.mp3"
-                counter += 1
+            # Ensure file doesn't exist (shouldn't happen, but safety check)
+            if dest_file.exists():
+                console.print(f"  [yellow]Warning: File {dest_file.name} already exists, skipping[/yellow]")
+                continue
             
             console.print(f"\n[yellow]Downloading:[/yellow] {episode_title}")
             console.print(f"  URL: {mp3_url}")
@@ -262,6 +425,9 @@ class PodcastHandler:
                 )
                 downloaded_files.append(dest_file)
                 self._save_downloaded_url(mp3_url)
+                self._save_url_mapping(mp3_url, assigned_number)
+                # Update local files tracking
+                self.local_files_by_number[assigned_number] = dest_file
                 new_episodes += 1
                 
             except Exception as e:
